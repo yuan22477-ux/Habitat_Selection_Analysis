@@ -1,2 +1,2 @@
 # Habitat_Selection_Analysis
-Three-dimensional habitat selection analysis using variables derived from lidar
+Using lidar-derived three-dimensional habitat structure variables, a habitat selection study of Francois's langur was conducted through random forest and optimal generalized liner models.
