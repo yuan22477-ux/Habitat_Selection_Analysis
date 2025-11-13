@@ -1,0 +1,190 @@
+library(MuMIn)
+library(ggplot2)
+library(dplyr)
+library(randomForest)
+library(pdp)
+library(scales)
+# Plot styling parameters
+AXIS_SIZE <- 16
+LEGEND_SIZE <- 19
+FONT <- "Times New Roman"
+
+plot_theme <- theme_bw(base_family = FONT) +
+  theme(
+    text = element_text(family = FONT),
+    axis.title = element_text(size = AXIS_SIZE),
+    axis.text = element_text(size = AXIS_SIZE),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = LEGEND_SIZE)
+  )
+# Data Preparation
+setwd('C:/Users/qq757/Desktop')
+habitat_data <- read.csv("lidar_habitat_variables.csv")
+# Check collinearity
+predictors <- setdiff(names(habitat_data), "presence")
+cor_matrix <- cor(habitat_data[predictors])
+high_cor <- which(abs(cor_matrix) > 0.8 & lower.tri(cor_matrix), arr.ind = TRUE)
+# Remove collinear variables
+habitat_data <- habitat_data[, !names(habitat_data) %in% c("CH", "B2")]
+predictors <- setdiff(names(habitat_data), "presence")
+# Prepare scaled data for GLM
+scaled_data <- habitat_data
+scaled_data[predictors] <- scale(habitat_data[predictors])
+scaled_data$presence <- as.factor(scaled_data$presence)
+# Model Training
+# GLM with model selection
+cat("Training GLM...\n")
+options(na.action = "na.fail")
+full_glm <- glm(presence ~ ., data = scaled_data, family = binomial)
+dredge_result <- dredge(full_glm, rank = "AICc")
+best_glm <- get.models(dredge_result, subset = 1)[[1]]
+
+# Variable importance
+glm_importance <- sw(dredge_result)
+top_vars_glm <- names(sort(glm_importance, decreasing = TRUE)[1:7])
+
+cat("GLM top 7 variables:\n")
+print(top_vars_glm)
+
+# Random Forest
+cat("\nTraining Random Forest...\n")
+rf_data <- habitat_data
+rf_data$presence <- factor(rf_data$presence, labels = c("Absent", "Present"))
+
+set.seed(123)
+rf_model <- randomForest(
+  presence ~ .,
+  data = rf_data,
+  ntree = 500,
+  mtry = sqrt(length(predictors)),
+  importance = TRUE
+)
+
+# Variable importance
+rf_importance <- importance(rf_model)[, "MeanDecreaseAccuracy"]
+rf_importance_df <- data.frame(
+  Variable = names(rf_importance),
+  Importance = rf_importance
+) %>% arrange(desc(Importance))
+
+top_vars_rf <- head(rf_importance_df$Variable, 7)
+cat("RF top 7 variables:\n")
+print(top_vars_rf)
+
+# Select variables for plotting
+plot_vars <- intersect(top_vars_glm, top_vars_rf)
+if (length(plot_vars) < 7) {
+  plot_vars <- top_vars_glm
+  cat("\nUsing GLM top 7 variables for plotting\n")
+}
+
+# Generate Response Curves
+
+cat("\nGenerating response curves...\n")
+
+# GLM response curves
+glm_curves <- lapply(plot_vars, function(var) {
+  var_range <- range(habitat_data[[var]], na.rm = TRUE)
+  x_vals <- seq(var_range[1], var_range[2], length.out = 100)
+  
+  # Create prediction data
+  pred_data <- data.frame(matrix(0, nrow = 100, ncol = length(predictors)))
+  names(pred_data) <- predictors
+  pred_data[[var]] <- scale(x_vals, 
+                             center = mean(habitat_data[[var]]), 
+                             scale = sd(habitat_data[[var]]))
+  
+  # Predict
+  pred <- predict(best_glm, newdata = pred_data, type = "link")
+  
+  data.frame(
+    x = x_vals,
+    y = plogis(pred),
+    variable = var,
+    model = "GLM"
+  )
+})
+
+# RF partial dependence plots
+rf_features <- rf_data[, predictors]
+rf_curves <- lapply(plot_vars, function(var) {
+  if (var %in% names(rf_features)) {
+    pd <- partial(rf_model, pred.var = var, which.class = "Present",
+                  prob = TRUE, plot = FALSE, train = rf_features)
+    
+    # Normalize to 0-1
+    pd$yhat_norm <- (pd$yhat - min(pd$yhat)) / (max(pd$yhat) - min(pd$yhat))
+    
+    data.frame(
+      x = pd[[var]],
+      y = pd$yhat_norm,
+      variable = var,
+      model = "RF"
+    )
+  }
+})
+
+# Create Plots
+
+cat("Creating plots...\n")
+
+# Create output folder
+dir.create("individual_plots", showWarnings = FALSE)
+
+# Generate individual plots
+for (i in seq_along(plot_vars)) {
+  var <- plot_vars[i]
+  
+  # Combine data
+  plot_data <- rbind(glm_curves[[i]], rf_curves[[i]])
+  
+  # Create plot
+  p <- ggplot(plot_data, aes(x = x, y = y, color = model)) +
+    geom_line(size = 1.2) +
+    scale_color_manual(values = c("GLM" = "#2E86C1", "RF" = "#E74C3C")) +
+    scale_x_continuous(labels = label_number(accuracy = 0.01)) +
+    labs(x = var, y = NULL) +
+    ylim(0, 1) +
+    plot_theme +
+    theme(
+      legend.position = if(i == 1) "top" else "none",
+      legend.direction = "horizontal",
+      aspect.ratio = 0.8
+    )
+  
+  if (i == 1) {
+    p <- p + guides(color = guide_legend(override.aes = list(size = 1.5)))
+  }
+  
+  # Save
+  ggsave(
+    filename = file.path("individual_plots", paste0(var, "_plot.tif")),
+    plot = p,
+    width = 4.5,
+    height = 4,
+    dpi = 600,
+    compression = "lzw"
+  )
+}
+
+# Export results
+
+# GLM importance
+write.csv(
+  data.frame(Variable = names(glm_importance), 
+             Importance = as.numeric(glm_importance)),
+  "glm_variable_importance.csv",
+  row.names = FALSE
+)
+
+# RF importance
+write.csv(rf_importance_df, "rf_variable_importance.csv", row.names = FALSE)
+
+# Comparison table
+comparison <- data.frame(
+  Variable = plot_vars,
+  GLM_Importance = glm_importance[plot_vars],
+  RF_Importance = rf_importance_df$Importance[match(plot_vars, rf_importance_df$Variable)]
+)
+write.csv(comparison, "variable_importance_comparison.csv", row.names = FALSE)
