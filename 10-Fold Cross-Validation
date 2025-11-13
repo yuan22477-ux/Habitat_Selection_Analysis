@@ -1,0 +1,160 @@
+library(MuMIn)
+library(randomForest)
+library(caret)
+library(pROC)
+library(dplyr)
+set.seed(123)
+setwd('C:/Users/qq757/Desktop')
+raw_data <- read.xlsx("RawData_LiDAR_derived_variables.xlsx")
+response_var <- "presence"
+predictor_vars <- setdiff(names(raw_data), response_var)
+cor_matrix <- cor(raw_data[predictor_vars])
+high_cor <- which(abs(cor_matrix) > 0.8 & lower.tri(cor_matrix), arr.ind = TRUE)
+if (nrow(high_cor) > 0) {
+  cat("High correlation detected (|r| > 0.8):\n")
+  for (i in 1:nrow(high_cor)) {
+    var1 <- rownames(cor_matrix)[high_cor[i, 1]]
+    var2 <- colnames(cor_matrix)[high_cor[i, 2]]
+    cat(sprintf("  %s & %s: r = %.3f\n", var1, var2, cor_matrix[var1, var2]))
+  }
+  cat("\nRemoving CH due to high correlation...\n\n")
+}
+filtered_data <- raw_data[, names(raw_data) != "CH"]
+filtered_data$presence <- as.factor(filtered_data$presence)
+scaled_data <- filtered_data
+scaled_predictors <- setdiff(names(filtered_data), response_var)
+scaled_data[scaled_predictors] <- scale(filtered_data[scaled_predictors])
+k_folds <- 10
+folds <- createFolds(filtered_data$presence, k = k_folds, list = TRUE)
+glm_performance <- data.frame()
+rf_performance <- data.frame()
+glm_models <- list()
+rf_models <- list()
+rf_importance_all <- list()
+for (fold in 1:k_folds) {
+  cat("Fold", fold, "/", k_folds, "\n")
+  cat("-", rep("-", 60), "\n", sep = "")
+  # Split data
+  test_idx <- folds[[fold]]
+  # GLM data (scaled)
+  glm_train <- scaled_data[-test_idx, ]
+  glm_test <- scaled_data[test_idx, ]
+  # RF data (original scale)
+  rf_train <- filtered_data[-test_idx, ]
+  rf_test <- filtered_data[test_idx, ]
+  cat("Train n =", nrow(glm_train), 
+      "(pos:", sum(glm_train$presence == 1), ")")
+  cat(" | Test n =", nrow(glm_test),
+      "(pos:", sum(glm_test$presence == 1), ")\n\n")
+  # GLM modeling
+  cat("Training GLM...\n")
+  
+  options(na.action = "na.fail")
+  full_glm <- glm(presence ~ ., data = glm_train, 
+                  family = binomial(link = "logit"))
+  # Model selection
+  dredge_result <- dredge(full_glm, rank = "AICc")
+  top_models <- subset(dredge_result, delta < 2)
+  best_glm <- get.models(dredge_result, subset = 1)[[1]]
+  cat("  Best model includes", 
+      length(all.vars(formula(best_glm))) - 1, "variables\n")
+  cat("  Number of candidate models (ΔAICc < 2):", nrow(top_models), "\n")
+  glm_models[[fold]] <- best_glm
+  # Predict on test set
+  glm_pred_prob <- predict(best_glm, newdata = glm_test, type = "response")
+  glm_pred_class <- ifelse(glm_pred_prob > 0.5, 1, 0)
+  # Calculate metrics
+  glm_roc <- roc(glm_test$presence, glm_pred_prob, quiet = TRUE)
+  glm_cm <- confusionMatrix(
+    factor(glm_pred_class, levels = c(0, 1)),
+    factor(glm_test$presence, levels = c(0, 1)),
+    positive = "1"
+  )
+  glm_performance <- rbind(glm_performance, data.frame(
+    Fold = fold,
+    Model = "GLM",
+    AUC = as.numeric(auc(glm_roc)),
+    Accuracy = glm_cm$overall['Accuracy'],
+    Sensitivity = glm_cm$byClass['Sensitivity'],
+    Specificity = glm_cm$byClass['Specificity'],
+    row.names = NULL
+  ))
+  # Random Forest modeling
+  cat("Training Random Forest...\n")
+  rf_model <- randomForest(
+    presence ~ .,
+    data = rf_train,
+    ntree = 500,
+    mtry = sqrt(ncol(rf_train) - 1),
+    importance = TRUE
+  ) 
+  rf_models[[fold]] <- rf_model
+  # Extract variable importance
+  imp_scores <- importance(rf_model)
+  rf_importance_all[[fold]] <- data.frame(
+    Fold = fold,
+    Variable = rownames(imp_scores),
+    MeanDecreaseAccuracy = imp_scores[, "MeanDecreaseAccuracy"],
+    row.names = NULL
+  )
+  cat("  OOB error rate:", 
+      round(rf_model$err.rate[nrow(rf_model$err.rate), 1] * 100, 2), "%\n")
+  # Predict on test set
+  rf_pred_prob <- predict(rf_model, newdata = rf_test, type = "prob")[, "1"]
+  rf_pred_class <- predict(rf_model, newdata = rf_test, type = "class")
+  # Calculate metrics
+  rf_roc <- roc(rf_test$presence, rf_pred_prob, quiet = TRUE)
+  rf_cm <- confusionMatrix(rf_pred_class, rf_test$presence, positive = "1")
+  rf_performance <- rbind(rf_performance, data.frame(
+    Fold = fold,
+    Model = "RF",
+    AUC = as.numeric(auc(rf_roc)),
+    Accuracy = rf_cm$overall['Accuracy'],
+    Sensitivity = rf_cm$byClass['Sensitivity'],
+    Specificity = rf_cm$byClass['Specificity'],
+    row.names = NULL
+  ))
+  cat("  Test AUC:", round(as.numeric(auc(rf_roc)), 3), "\n")
+  cat("  Test Accuracy:", round(rf_cm$overall['Accuracy'], 3), "\n\n")
+}
+# Combine results
+all_performance <- rbind(glm_performance, rf_performance)
+# Summary statistics by model
+summary_stats <- all_performance %>%
+  group_by(Model) %>%
+  summarise(
+    Mean_AUC = mean(AUC, na.rm = TRUE),
+    SD_AUC = sd(AUC, na.rm = TRUE),
+    Mean_Accuracy = mean(Accuracy, na.rm = TRUE),
+    SD_Accuracy = sd(Accuracy, na.rm = TRUE),
+    Mean_Sensitivity = mean(Sensitivity, na.rm = TRUE),
+    SD_Sensitivity = sd(Sensitivity, na.rm = TRUE),
+    Mean_Specificity = mean(Specificity, na.rm = TRUE),
+    SD_Specificity = sd(Specificity, na.rm = TRUE)
+  )
+# Convert to percentage and round
+summary_print <- summary_stats
+summary_print[, 2:9] <- round(summary_print[, 2:9] * 100, 2)
+# Variable importance summary for RF
+rf_importance_summary <- do.call(rbind, rf_importance_all) %>%
+  group_by(Variable) %>%
+  summarise(
+    Mean_MDA = mean(MeanDecreaseAccuracy),
+    SD_MDA = sd(MeanDecreaseAccuracy)
+  ) %>%
+  arrange(desc(Mean_MDA))
+cat("\nGenerating visualization...\n")
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 2))
+# Performance metrics (percentage format)
+perf_export <- all_performance
+perf_export[, 3:6] <- round(perf_export[, 3:6] * 100, 2)
+write.csv(perf_export, "CV_performance_by_fold.csv", row.names = FALSE)
+# Summary statistics
+write.csv(summary_print, "CV_performance_summary.csv", row.names = FALSE)
+# RF variable importance
+write.csv(rf_importance_summary, "RF_variable_importance.csv", row.names = FALSE)
+cat("\nFiles saved:\n")
+cat("  - CV_performance_by_fold.csv\n")
+cat("  - CV_performance_summary.csv\n")
+cat("  - RF_variable_importance.csv\n")
+cat("\nAnalysis complete!\n")
