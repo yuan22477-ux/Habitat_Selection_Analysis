@@ -1,0 +1,122 @@
+
+library(lidR)
+library(terra)
+library(dplyr)
+las_folder <- "D:/desktop/point cloud_yezhong"
+las_files <- list.files(las_folder, pattern = "\\.las$", full.names = TRUE)
+# 创建结果数据框
+results <- data.frame(
+  presence = integer(),
+  CC = numeric(),
+  CH = numeric(),
+  MH = numeric(),
+  CRR = numeric(),
+  CS = numeric(),
+  VVD = numeric(),
+  B2 = numeric(),
+  B2.5 = numeric(),
+  B5.10 = numeric(),
+  ELE = numeric(),
+  SL = numeric(),
+  NOR = numeric(),
+  EAS = numeric(),
+  stringsAsFactors = FALSE
+)
+extract_variables <- function(las_file, index, total) {
+  file_name <- basename(las_file)
+  cat(sprintf("[%d/%d] 正在处理: %s\n", index, total, file_name))
+  tryCatch({
+    las <- readLAS(las_file)
+    presence <- ifelse(startsWith(file_name, "c"), 0, 1)
+    dtm <- rasterize_terrain(las, res = 0.2, algorithm = kriging(k = 10))
+    las_norm <- normalize_height(las, dtm)
+    las_norm <- filter_poi(las_norm, Classification != 2, Z >= 0)
+    chm <- rasterize_canopy(las_norm, res = 0.2, algorithm = p2r())
+    dem <- dtm
+    #  提取水平结构变量     
+    # CC - Canopy Cover 
+    cells_above_3m <- sum(chm[] > 3, na.rm = TRUE)
+    total_cells <- sum(!is.na(chm[]))
+    CC <- cells_above_3m / total_cells
+    # CH - Canopy Height
+    CH <- mean(chm[], na.rm = TRUE)
+    # MH - Maximum Height
+    MH <- max(chm[], na.rm = TRUE)
+    # CRR - Canopy Relief Ratio
+    Hmean <- mean(chm[], na.rm = TRUE)
+    Hmin <- min(chm[], na.rm = TRUE)
+    Hmax <- max(chm[], na.rm = TRUE)
+    CRR <- (Hmean - Hmin) / (Hmax - Hmin)
+    #  提取垂直结构变量     
+    voxels <- voxel_metrics(las_norm, ~length(Z), res = 1)
+    # CS - Canopy Shape
+    # 计算每个高度层的体素数量
+    height_bins <- seq(0, max(voxels$Z, na.rm = TRUE), by = 1)
+    volume_by_height <- sapply(height_bins[-length(height_bins)], function(h) {
+      sum(voxels$Z >= h & voxels$Z < h + 1, na.rm = TRUE)
+    })
+    max_volume_height <- height_bins[which.max(volume_by_height)]
+    h99 <- quantile(las_norm$Z, 0.99, na.rm = TRUE)
+    CS <- max_volume_height / h99
+    # VVD - Vegetation Vertical Distribution
+    VVD <- sd(las_norm$Z, na.rm = TRUE)
+    # B2 - Proportion below 2m
+    total_volume <- nrow(voxels)
+    B2 <- sum(voxels$Z < 2, na.rm = TRUE) / total_volume
+    # B2.5 - Proportion between 2-5m
+    B2.5 <- sum(voxels$Z >= 2 & voxels$Z < 5, na.rm = TRUE) / total_volume
+    # B5.10 - Proportion between 5-10m
+    B5.10 <- sum(voxels$Z >= 5 & voxels$Z < 10, na.rm = TRUE) / total_volume
+    # 提取地形特征变量
+    # ELE - Elevation
+    ELE <- mean(dem[], na.rm = TRUE)
+    # SL - Slope
+    slope_raster <- terrain(dem, "slope", unit = "degrees")
+    SL <- mean(slope_raster[], na.rm = TRUE)
+    # NOR - Northness (坡向的余弦值)
+    aspect_raster <- terrain(dem, "aspect", unit = "radians")
+    NOR <- mean(cos(aspect_raster[]), na.rm = TRUE)
+    # EAS - Eastness (坡向的正弦值)
+    EAS <- mean(sin(aspect_raster[]), na.rm = TRUE)
+    result_row <- data.frame(
+      presence = presence,
+      CC = round(CC, 7),
+      CH = round(CH, 7),
+      MH = round(MH, 4),
+      CRR = round(CRR, 7),
+      CS = round(CS, 7),
+      VVD = round(VVD, 2),
+      B2 = round(B2, 7),
+      B2.5 = round(B2.5, 7),
+      B5.10 = round(B5.10, 7),
+      ELE = round(ELE, 4),
+      SL = round(SL, 6),
+      NOR = round(NOR, 6),
+      EAS = round(EAS, 6)
+    )
+    rm(las, las_norm, dtm, chm, dem, voxels, slope_raster, aspect_raster)
+    gc()
+    cat(sprintf("  ✓ 完成 (presence=%d, CC=%.3f, CH=%.2f)\n\n", presence, CC, CH))
+    return(result_row)
+  }, error = function(e) {
+    cat(sprintf("  ✗ 错误: %s\n\n", e$message))
+    return(NULL)
+  })
+}
+cat("开始提取变量...\n")
+cat(rep("=", 60), "\n\n")
+for (i in seq_along(las_files)) {
+  result_row <- extract_variables(las_files[i], i, length(las_files))
+  if (!is.null(result_row)) {
+    results <- rbind(results, result_row)
+  }
+  # 每处理10个文件保存一次（防止意外丢失）
+  if (i %% 10 == 0) {
+    write.csv(results, "lidar_variables_temp.csv", row.names = FALSE)
+    cat(sprintf(">>> 已保存临时结果 (%d/%d)\n\n", i, length(las_files)))
+  }
+}
+#保存最终结果 
+# 保存为CSV文件
+output_file <- "lidar_habitat_variables.csv"
+write.csv(results, output_file, row.names = FALSE)
