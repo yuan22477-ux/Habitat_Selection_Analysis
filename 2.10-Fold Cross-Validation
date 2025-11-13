@@ -5,7 +5,7 @@ library(pROC)
 library(dplyr)
 set.seed(123)
 setwd('C:/Users/qq757/Desktop')
-raw_data <- read.xlsx("RawData_LiDAR_derived_variables.xlsx")
+raw_data <- read.csv("RawData_LiDAR_derived_variables.csv")
 response_var <- "presence"
 predictor_vars <- setdiff(names(raw_data), response_var)
 cor_matrix <- cor(raw_data[predictor_vars])
