@@ -5,29 +5,20 @@ library(dplyr)
 library(patchwork)
 library(kernelshap)
 library(tibble)
-# PART A: 字体大小与主题控制 (在此处修改所有字体大小)
-# --- 您可以在这里方便地调整所有字体大小 ---
-FONT_SIZE_AXIS_TEXT <- 16   # 坐标轴刻度文字大小 (例如 "Elevation", "0.05")
-FONT_SIZE_AXIS_TITLE <- 18  # 坐标轴标题大小 (例如 "Variable")
-FONT_SIZE_TAG <- 24         # 组合图左上角 A/B 标签的大小
-# 创建一个通用的图表主题，以便在两个图之间保持一致性
+FONT_SIZE_AXIS_TEXT <- 16   
+FONT_SIZE_AXIS_TITLE <- 18 
+FONT_SIZE_TAG <- 24        
 common_theme <- theme_bw(base_family = "Times New Roman") +
   theme(
     panel.grid = element_blank(),
     panel.border = element_blank(),
     axis.line = element_line(color = "black"),
-    # 使用上面定义的变量来控制字体大小
     axis.title = element_text(size = FONT_SIZE_AXIS_TITLE, color = "black"),
     axis.text = element_text(size = FONT_SIZE_AXIS_TEXT, color = "black")
   )
-# ============================================================================
-# PART B: 广义线性模型 (GLM) 模型平均的 SHAP 分析
-# ===========================================================================
-# 2. 设置工作目录并读取数据
-# --- 请确保路径正确 ---
+# 广义线性模型 (GLM) 模型平均的 SHAP 分析
 setwd("C:/Users/qq757/Desktop")
-df_original <- read.csv("lidar_metrice.csv", header = TRUE)
-# 3. GLM 数据预处理
+df_original <- read.csv("RawData_LiDAR_derived_variables.csv", header = TRUE)
 df_scaled <- df_original
 response_var <- "presence"
 predictor_vars <- setdiff(names(df_original), response_var)
@@ -36,11 +27,9 @@ df_scaled$presence <- as.factor(df_scaled$presence)
 vars_to_remove <- c("Hmax", "H25p", "H75p", "B2.5", "CH")
 df_filtered <- df_scaled[, !(names(df_scaled) %in% vars_to_remove)]
 predictor_vars_filtered <- setdiff(names(df_filtered), response_var)
-# 4. GLM 建模与模型选择
 options(na.action = "na.fail")
 global_model <- glm(presence ~ ., data = df_filtered, family = binomial(link = "logit"))
 dredge_results <- dredge(global_model, rank = "AICc")
-# 5. 为模型平均结果计算 SHAP 值
 top_models_subset <- get.models(dredge_results, subset = delta < 2)
 model_weights <- subset(dredge_results, delta < 2)$weight
 X_glm <- df_filtered[, predictor_vars_filtered]
@@ -53,23 +42,17 @@ for (i in seq_along(top_models_subset)) {
 }
 weighted_shap_matrices <- mapply(`*`, shap_values_list, model_weights, SIMPLIFY = FALSE)
 avg_shap_values <- Reduce(`+`, weighted_shap_matrices)
-# 6. 创建 GLM 的 SHAP 重要性图
 shap_importance_df_glm <- data.frame(
   Variable = names(colMeans(abs(avg_shap_values))),
   Importance = colMeans(abs(avg_shap_values))
 ) %>%
   arrange(Importance) %>%
   mutate(Variable = factor(Variable, levels = Variable))
-
 shap_plot_glm <- ggplot(shap_importance_df_glm, aes(x = Importance, y = Variable)) +
   geom_col(fill = "skyblue", color = "black") +
   labs(title = NULL, x = "Variable importance from shap value", y = "Variable") +
-  # 应用我们预先定义的通用主题
-  common_theme
-# ============================================================================
-# PART C: 随机森林 (Random Forest) 的 SHAP 分析
-# ============================================================================
-# 7. RF 数据准备与模型训练
+# 随机森林 (Random Forest) 的 SHAP 分析
+#RF 数据准备与模型训练
 data_rf <- df_original
 data_rf$presence <- as.factor(data_rf$presence)
 set.seed(123)
@@ -77,11 +60,11 @@ rf_model <- randomForest(
   presence ~ ., data = data_rf, ntree = 500,
   mtry = floor(sqrt(ncol(data_rf) - 1)), importance = TRUE
 )
-# 8. 为 RF 模型计算 SHAP 值
+# 为 RF 模型计算 SHAP 值
 X_rf <- data_rf[, setdiff(names(data_rf), "presence")]
 pfun_rf <- function(model, newdata) { predict(model, newdata = newdata, type = "prob")[, "1"] }
 shap_obj_rf <- kernelshap(rf_model, X = X_rf, pred_fun = pfun_rf, bg_X = X_rf)
-# 9. 创建 RF 的 SHAP 重要性图
+# 创建 RF 的 SHAP 重要性图
 shap_importance_df_rf <- data.frame(
   Variable = colnames(shap_obj_rf$S),
   Importance = colMeans(abs(shap_obj_rf$S))
@@ -91,17 +74,9 @@ shap_importance_df_rf <- data.frame(
 shap_plot_rf <- ggplot(shap_importance_df_rf, aes(x = Importance, y = Variable)) +
   geom_col(fill = "skyblue", color = "black") +
   labs(title = NULL, x = "Variable importance from shap value", y = "Variable") +
-  # 应用我们预先定义的通用主题
-  common_theme
-# ============================================================================
-# PART D: 组合图表并进行最终美化
-# ============================================================================
-# 10. 使用 patchwork 组合两个图表并调整 A/B 标签大小
 combined_shap_plot <- shap_plot_rf + shap_plot_glm +
-  plot_annotation(tag_levels = 'A') &  # `&` 符号很重要
-  # 在这里专门设置 A/B 标签的样式
+  plot_annotation(tag_levels = 'A') & 
   theme(plot.tag = element_text(size = FONT_SIZE_TAG, face = "bold", family = "Times New Roman"))
-# 11. 显示并保存最终的组合图
 print(combined_shap_plot)
 ggsave(
   "combined_shap_importance_RF_vs_GLM_custom_font.tif",
@@ -114,30 +89,20 @@ ggsave(
   compression = "lzw"
 )
 cat("\n分析全部完成。字体大小可调的组合图已保存为 'combined_shap_importance_RF_vs_GLM_custom_font.tif'\n")
-# ============================================================================
-# PART E: 导出 SHAP 重要性值为 CSV 文件
-# ============================================================================
-# 12. 将两个模型的重要性数据框合并到一个文件中，以便于比较
-# 首先，重命名各自的重要性列，以明确区分它们
+# 导出 SHAP 重要性值为 CSV 文件
 shap_importance_glm_renamed <- shap_importance_df_glm %>%
   rename(GLM_SHAP_Importance = Importance)
 shap_importance_rf_renamed <- shap_importance_df_rf %>%
   rename(RF_SHAP_Importance = Importance)
-# 使用 full_join 按变量名合并两个数据框
-# full_join可以确保即使某个变量只在一个模型中出现，也不会被丢失
 combined_importance_df <- full_join(
   shap_importance_rf_renamed,
   shap_importance_glm_renamed,
   by = "Variable"
 )
-# 按照 RF 模型的重要性降序排列，方便查看
 combined_importance_df <- combined_importance_df %>%
   arrange(desc(RF_SHAP_Importance))
-# 13. 将合并后的数据框写入 CSV 文件
 write.csv(
   combined_importance_df,
   file = "SHAP_variable_importance_summary.csv",
   row.names = FALSE  # 不保存行号
 )
-# 在控制台打印一条消息，确认文件已保存
-cat("\nSHAP 重要性值已成功导出到文件: 'SHAP_variable_importance_summary.csv'\n")
